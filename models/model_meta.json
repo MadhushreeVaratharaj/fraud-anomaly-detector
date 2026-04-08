@@ -1,0 +1,21 @@
+{
+  "model_name": "Random Forest",
+  "features": [
+    "type_enc",
+    "log_amount",
+    "balance_drain_orig",
+    "balance_zero_after",
+    "dest_balance_increase",
+    "amount_to_balance_ratio",
+    "orig_balance_mismatch",
+    "dest_balance_mismatch",
+    "hour_of_day",
+    "is_large_tx"
+  ],
+  "auc_roc": 0.9985,
+  "avg_precision": 0.9971,
+  "train_rows": 2216327,
+  "fraud_rate_pct": 0.2964,
+  "dataset": "Real PaySim \u2014 TRANSFER + CASH_OUT only",
+  "threshold": 0.5
+}
