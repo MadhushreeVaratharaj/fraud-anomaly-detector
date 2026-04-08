@@ -1,0 +1,14 @@
+# Large data files — do not push to GitHub
+data/PS_20174392719_1491204439457_log.csv
+data/features_train.csv
+data/features_test.csv
+
+# Trained model
+models/fraud_model.pkl
+
+__pycache__/
+*.pyc
+.env
+*.log
+.DS_Store
+venv/
