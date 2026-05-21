@@ -1,12 +1,15 @@
 """
 03_train_model.py
 -----------------
-Trains Logistic Regression + Random Forest on the real PaySim feature matrix.
-Handles extreme class imbalance (~0.13% fraud) via class_weight='balanced'.
+Trains Logistic Regression + Random Forest + XGBoost on the real PaySim feature matrix.
+Handles extreme class imbalance (~0.13% fraud):
+  - Logistic Regression / Random Forest: class_weight='balanced'
+  - XGBoost: scale_pos_weight = (num_negative / num_positive)
 
 Expected real-data performance:
-  Logistic Regression: AUC-ROC ~0.97, Avg Precision ~0.55
+  Logistic Regression: AUC-ROC ~0.97,  Avg Precision ~0.55
   Random Forest:       AUC-ROC ~0.997, Avg Precision ~0.88
+  XGBoost:             AUC-ROC ~0.998, Avg Precision ~0.90  (approximate)
 
 Run:  python notebooks/03_train_model.py
 Output: models/fraud_model.pkl, models/model_meta.json, models/eval_plots/
@@ -33,6 +36,9 @@ from sklearn.metrics       import (
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline      import Pipeline
 
+# --- NEW: XGBoost import ---
+from xgboost import XGBClassifier
+
 ROOT      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRAIN_CSV = os.path.join(ROOT, "data", "features_train.csv")
 TEST_CSV  = os.path.join(ROOT, "data", "features_test.csv")
@@ -44,7 +50,11 @@ sys.path.insert(0, os.path.join(ROOT, "notebooks"))
 from feature_engineering_utils import FEATURE_COLS, TARGET
 
 sns.set_theme(style="whitegrid", font_scale=1.05)
-COLORS = {"Logistic Regression": "#378ADD", "Random Forest": "#1D9E75"}
+COLORS = {
+    "Logistic Regression": "#378ADD",
+    "Random Forest":       "#1D9E75",
+    "XGBoost":             "#D85A30",   # coral — distinct from the other two
+}
 
 
 def plot_roc_pr(models_dict, X_test, y_test):
@@ -60,7 +70,7 @@ def plot_roc_pr(models_dict, X_test, y_test):
         axes[1].plot(rec, prec, label=f"{name} (AP={ap:.4f})",
                      color=COLORS[name], lw=2)
 
-    axes[0].plot([0,1],[0,1], "k--", lw=0.8, label="Random baseline")
+    axes[0].plot([0, 1], [0, 1], "k--", lw=0.8, label="Random baseline")
     axes[0].set(title="ROC Curve — real PaySim", xlabel="False Positive Rate",
                 ylabel="True Positive Rate")
     axes[0].legend()
@@ -83,29 +93,76 @@ def plot_confusion(model, X_test, y_test, name):
     cm = confusion_matrix(y_test, y_pred)
     fig, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(cm, annot=True, fmt=",d", cmap="Blues",
-                xticklabels=["Legitimate","Fraud"],
-                yticklabels=["Legitimate","Fraud"], ax=ax)
+                xticklabels=["Legitimate", "Fraud"],
+                yticklabels=["Legitimate", "Fraud"], ax=ax)
     tn, fp, fn, tp = cm.ravel()
     ax.set_title(f"{name}\nTP={tp:,}  FP={fp:,}  FN={fn:,}  TN={tn:,}")
     ax.set(ylabel="Actual", xlabel="Predicted")
     plt.tight_layout()
-    fname = name.lower().replace(" ","_")
+    fname = name.lower().replace(" ", "_")
     path = os.path.join(PLOT_DIR, f"confusion_{fname}.png")
     plt.savefig(path, dpi=150); plt.close()
     print(f"  → {path}")
 
 
-def plot_feature_importance(rf_pipeline):
-    clf = rf_pipeline.named_steps["clf"]
+def plot_feature_importance(model, name, color):
+    """
+    Works for both Random Forest (sklearn) and XGBoost.
+    Both expose .feature_importances_ on the fitted classifier step.
+    """
+    # XGBoost is a plain classifier (no Pipeline), RF is wrapped in a Pipeline
+    if hasattr(model, "named_steps"):
+        clf = model.named_steps["clf"]
+    else:
+        clf = model
+
     imp = pd.Series(clf.feature_importances_, index=FEATURE_COLS).sort_values()
     fig, ax = plt.subplots(figsize=(7, 5))
-    colors = ["#E24B4A" if i == imp.idxmax() else "#B5D4F4" for i in imp.index]
+    colors = [color if i == imp.idxmax() else "#B5D4F4" for i in imp.index]
     ax.barh(imp.index, imp.values, color=colors, edgecolor="white")
-    ax.set_title("Random Forest feature importances — real PaySim")
+    ax.set_title(f"{name} feature importances — real PaySim")
     ax.set_xlabel("Importance")
     sns.despine()
     plt.tight_layout()
-    path = os.path.join(PLOT_DIR, "feature_importance.png")
+    fname = name.lower().replace(" ", "_")
+    path = os.path.join(PLOT_DIR, f"feature_importance_{fname}.png")
+    plt.savefig(path, dpi=150); plt.close()
+    print(f"  → {path}")
+
+
+def plot_model_comparison(results):
+    """
+    Bar chart comparing AUC-ROC and Average Precision across all three models.
+    Useful for your README and for explaining model selection in interviews.
+    """
+    names  = list(results.keys())
+    aucs   = [results[n]["auc_roc"] for n in names]
+    aps    = [results[n]["avg_precision"] for n in names]
+    x      = np.arange(len(names))
+    width  = 0.35
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars1 = ax.bar(x - width/2, aucs, width, label="AUC-ROC",
+                   color=[COLORS[n] for n in names], alpha=0.9)
+    bars2 = ax.bar(x + width/2, aps,  width, label="Avg Precision",
+                   color=[COLORS[n] for n in names], alpha=0.5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(names)
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Model comparison — AUC-ROC vs Average Precision")
+    ax.set_ylabel("Score")
+    ax.legend()
+
+    # Annotate bars with values
+    for bar in list(bars1) + list(bars2):
+        h = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2, h + 0.005,
+                f"{h:.3f}", ha="center", va="bottom", fontsize=9)
+
+    sns.despine()
+    plt.tight_layout()
+    path = os.path.join(PLOT_DIR, "model_comparison.png")
     plt.savefig(path, dpi=150); plt.close()
     print(f"  → {path}")
 
@@ -124,6 +181,15 @@ def main():
     print(f"  Train: {len(X_train):,} | fraud {y_train.sum():,} ({y_train.mean()*100:.3f}%)")
     print(f"  Test:  {len(X_test):,}  | fraud {y_test.sum():,}  ({y_test.mean()*100:.3f}%)")
 
+    # --- NEW: compute scale_pos_weight for XGBoost ---
+    # This is the XGBoost equivalent of class_weight='balanced'
+    # Formula: number of negative samples / number of positive samples
+    # On PaySim this will be roughly (99.87% / 0.13%) ≈ 769
+    neg_count = (y_train == 0).sum()
+    pos_count = (y_train == 1).sum()
+    spw = round(neg_count / pos_count, 2)
+    print(f"\n  XGBoost scale_pos_weight = {neg_count:,} / {pos_count:,} = {spw}")
+
     models = {
         "Logistic Regression": Pipeline([
             ("scaler", StandardScaler()),
@@ -141,15 +207,30 @@ def main():
                 n_jobs=-1,
             )),
         ]),
+
+        # --- NEW: XGBoost model ---
+        # Does NOT go inside a Pipeline because XGBoost handles its own internals.
+        # scale_pos_weight replaces class_weight='balanced'.
+        # eval_metric set to avoid a deprecation warning; we evaluate externally.
+        "XGBoost": XGBClassifier(
+            n_estimators=300,
+            max_depth=6,           # shallower than RF — XGBoost builds many weak trees
+            learning_rate=0.1,
+            scale_pos_weight=spw,  # key imbalance handler
+            use_label_encoder=False,
+            eval_metric="logloss",
+            random_state=42,
+            n_jobs=-1,
+        ),
     }
 
-    results  = {}
-    trained  = {}
+    results = {}
+    trained = {}
 
     for name, model in models.items():
         print(f"\nTraining {name}...")
         model.fit(X_train, y_train)
-        y_prob = model.predict_proba(X_test)[:,1]
+        y_prob = model.predict_proba(X_test)[:, 1]
         y_pred = model.predict(X_test)
         auc    = roc_auc_score(y_test, y_prob)
         ap     = average_precision_score(y_test, y_prob)
@@ -172,21 +253,31 @@ def main():
     plot_roc_pr(trained, X_test, y_test)
     for name, model in trained.items():
         plot_confusion(model, X_test, y_test, name)
-    plot_feature_importance(trained["Random Forest"])
+
+    # Feature importance for tree-based models only
+    plot_feature_importance(trained["Random Forest"], "Random Forest", "#1D9E75")
+    plot_feature_importance(trained["XGBoost"],       "XGBoost",       "#D85A30")
+
+    # NEW: side-by-side model comparison chart
+    plot_model_comparison(results)
 
     model_path = os.path.join(MODEL_DIR, "fraud_model.pkl")
     meta_path  = os.path.join(MODEL_DIR, "model_meta.json")
     joblib.dump(best_model, model_path)
 
     meta = {
-        "model_name":     best_name,
-        "features":       FEATURE_COLS,
-        "auc_roc":        round(results[best_name]["auc_roc"], 4),
-        "avg_precision":  round(results[best_name]["avg_precision"], 4),
-        "train_rows":     len(X_train),
-        "fraud_rate_pct": round(y_train.mean() * 100, 4),
-        "dataset":        "Real PaySim — TRANSFER + CASH_OUT only",
-        "threshold":      0.5,
+        "model_name":      best_name,
+        "features":        FEATURE_COLS,
+        "auc_roc":         round(results[best_name]["auc_roc"], 4),
+        "avg_precision":   round(results[best_name]["avg_precision"], 4),
+        "train_rows":      len(X_train),
+        "fraud_rate_pct":  round(y_train.mean() * 100, 4),
+        "dataset":         "Real PaySim — TRANSFER + CASH_OUT only",
+        "threshold":       0.5,
+        "all_model_results": {
+            k: {mk: round(mv, 4) for mk, mv in v.items()}
+            for k, v in results.items()
+        },
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
